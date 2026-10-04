@@ -112,7 +112,7 @@ svg.i{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke
 <canvas id="bg" aria-hidden="true"></canvas><div id="shade"></div>
 <div class="nav"><div class="navin">
   <div class="brand"><span class="dot" id="dot"></span>LUXVOICE</div>
-  <span class="mute small" id="status">не в комнате</span>
+  <span style="display:flex;align-items:center;gap:12px"><button class="btn" id="jitsi" hidden style="padding:6px 14px;font-size:14px" title="Если не соединилось: оба нажмите эту кнопку">Запасной вход</button><span class="mute small" id="status">не в комнате</span></span>
 </div></div>
 
 <main>
@@ -120,6 +120,10 @@ svg.i{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke
     <h1 class="shine" id="ttl">Войс для своих</h1>
     <p id="sub">Создай комнату, отправь ссылку другу — и вы на связи. Голос, чат и демка экрана. Без регистрации.</p>
     <button class="btn primary big" id="go">Создать комнату</button>
+    <form class="invite" id="byCode" style="margin-top:22px" onsubmit="event.preventDefault();var c=this.c.value.trim();if(c)location.search='?r='+encodeURIComponent(c)">
+      <input name="c" placeholder="Или введи код комнаты" aria-label="Код комнаты" autocomplete="off">
+      <button class="btn">Войти по коду</button>
+    </form>
     <div class="how"><span>голос напрямую</span><span>чат</span><span>показ экрана</span><span>телефон и ПК</span></div>
   </section>
 
@@ -128,6 +132,7 @@ svg.i{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke
       <div class="invite" id="invite">
         <input id="link" readonly aria-label="Ссылка на комнату">
         <button class="btn primary" id="copy">Копировать</button>
+        <span class="mute small" id="code" style="flex-basis:100%"></span>
       </div>
       <div class="peers">
         <div class="peer talk-off" id="p-me"><div class="orb">Я</div><b>Ты</b><small id="s-me">микрофон включён</small></div>
@@ -176,10 +181,22 @@ svg.i{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 const $ = s => document.querySelector(s);
+// === ВСТАВЬ СЮДА ссылку Metered (бесплатный TURN, без него связь часто не поднимается) ===
+// пример: 'https://luxvoice.metered.live/api/v1/turn/credentials?apiKey=ТВОЙ_КЛЮЧ'
+const TURN_API = '';
 const ICE = { iceServers: [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
+  { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:global.stun.twilio.com:3478' }
 ] };
+async function loadIce() {
+  if (!TURN_API) return;
+  try { const r = await fetch(TURN_API, { signal: AbortSignal.timeout(5000) }); ICE.iceServers.push(...await r.json()); }
+  catch { toast('TURN не загрузился, проверь ссылку Metered'); }
+}
+let joinT;
+function watch(c) {
+  c.on('iceStateChanged', s => { if (s === 'failed') { setStatus('нет связи', false); toast('Прямая связь не вышла. Оба нажмите «Запасной вход» вверху'); } });
+}
 const room = new URLSearchParams(location.search).get('r');
 let peer, local, conn, remoteId, screenCall, screenStream, actx;
 
@@ -195,13 +212,14 @@ $('#go').onclick = async () => {
   catch { return toast('Разреши доступ к микрофону в настройках браузера'); }
   meter(local, '#p-me', true); initSettings();
   try { navigator.wakeLock && navigator.wakeLock.request('screen'); } catch {}
+  await loadIce();
   room ? join() : create();
 };
 
 function wire() {
   peer.on('call', c => {
     if (c.metadata && c.metadata.screen) { c.answer(); c.on('stream', showScreen); c.on('close', hideScreen); }
-    else { c.answer(local); c.on('stream', playVoice); }
+    else { c.answer(local); watch(c); c.on('stream', playVoice); }
   });
   peer.on('connection', setConn);
   peer.on('disconnected', () => { try { peer.reconnect(); } catch {} });
@@ -211,13 +229,17 @@ function wire() {
   });
 }
 
-function showRoom() { $('#home').hidden = true; $('#room').hidden = false; }
+function showRoom() { $('#home').hidden = true; $('#room').hidden = false; $('#jitsi').hidden = false; }
+// запасной вариант: общая комната в Jitsi (свои серверы, работает без настройки)
+$('#jitsi').onclick = () => window.open('https://meet.jit.si/luxvoice-' + (room || peer.id) + '#config.startWithVideoMuted=true', '_blank');
+// Safari/телефоны: если звук заблокирован, любое касание его включает
+addEventListener('pointerdown', () => { const a = $('#aud'); if (a.srcObject && a.paused) a.play().catch(() => {}); if (actx && actx.state === 'suspended') actx.resume(); });
 
 function create() {
   const id = 'lux' + Math.random().toString(36).slice(2, 8);
   peer = new Peer(id, { config: ICE });
   peer.on('open', () => {
-    $('#link').value = location.origin + location.pathname + '?r=' + id;
+    $('#link').value = location.origin + location.pathname + '?r=' + id; $('#code').textContent = 'Код комнаты: ' + id;
     showRoom(); setStatus('ждём друга', false); sys('Комната создана. Отправь ссылку другу.');
   });
   wire();
@@ -228,8 +250,13 @@ function join() {
   wire();
   peer.on('open', () => {
     showRoom(); $('#invite').hidden = true; setStatus('подключаемся…', false);
-    setConn(peer.connect(room, { reliable: true }));
-    const c = peer.call(room, local); c.on('stream', playVoice);
+    const dial = () => {
+      if (conn) try { conn.close(); } catch {}
+      setConn(peer.connect(room, { reliable: true }));
+      const c = peer.call(room, local); watch(c); c.on('stream', playVoice);
+    };
+    dial();
+    joinT = setTimeout(() => { dial(); joinT = setTimeout(() => { setStatus('нет связи', false); toast('Не соединилось. Оба нажмите «Запасной вход» вверху'); }, 12000); }, 10000);
   });
 }
 
@@ -241,6 +268,7 @@ function setConn(c) {
 }
 
 function playVoice(s) {
+  clearTimeout(joinT);
   const a = $('#aud'); a.srcObject = s; a.play().catch(() => {});
   $('#p-fr').classList.remove('wait'); $('#s-fr').textContent = 'на связи'; setStatus('в войсе', true);
   meter(s, '#p-fr');
