@@ -118,12 +118,9 @@ svg.i{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke
 <main>
   <section id="home" class="glass">
     <h1 class="shine" id="ttl">Войс для своих</h1>
-    <p id="sub">Создай комнату, отправь ссылку другу — и вы на связи. Голос, чат и демка экрана. Без регистрации.</p>
-    <button class="btn primary big" id="go">Создать комнату</button>
-    <form class="invite" id="byCode" style="margin-top:22px" onsubmit="event.preventDefault();var c=this.c.value.trim();if(c)location.search='?r='+encodeURIComponent(c)">
-      <input name="c" placeholder="Или введи код комнаты" aria-label="Код комнаты" autocomplete="off">
-      <button class="btn">Войти по коду</button>
-    </form>
+    <p id="sub">Придумай код комнаты (или оставь этот) и жми «Войти». Другу отправь ссылку или код: он введёт его так же и попадёт к тебе.</p>
+    <input id="codeIn" maxlength="24" placeholder="Код комнаты, например kent-voice" aria-label="Код комнаты" autocomplete="off" autocapitalize="off" spellcheck="false" style="display:block;width:min(360px,100%);margin:0 auto 16px;text-align:center;background:rgba(0,0,0,.5);border:1px solid var(--line);border-radius:14px;padding:13px 16px;font-size:17px">
+    <button class="btn primary big" id="go">Войти в комнату</button>
     <div class="how"><span>голос напрямую</span><span>чат</span><span>показ экрана</span><span>телефон и ПК</span></div>
   </section>
 
@@ -197,7 +194,9 @@ let joinT;
 function watch(c) {
   c.on('iceStateChanged', s => { if (s === 'failed') { setStatus('нет связи', false); toast('Прямая связь не вышла. Оба нажмите «Запасной вход» вверху'); } });
 }
-const room = new URLSearchParams(location.search).get('r');
+// код можно вводить как есть или вставить целую ссылку: код вытащится сам
+const clean = s => { s = String(s || '').trim(); const m = s.match(/[?#&]r=([^&#\s]+)/); if (m) s = decodeURIComponent(m[1]); return s.toLowerCase().replace(/^luxv-/, '').replace(/[^a-z0-9-]/g, '').slice(0, 24); };
+let room = clean(new URLSearchParams(location.search).get('r') || location.hash.slice(1)), tries = 0;
 let peer, local, conn, remoteId, screenCall, screenStream, actx;
 
 const toast = t => { const e = $('#toast'); e.textContent = t; e.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => e.classList.remove('show'), 3200); };
@@ -207,13 +206,19 @@ function addMsg(t, cls) { const d = document.createElement('div'); d.className =
 
 // ---- вход ----
 if (room) { $('#ttl').textContent = 'Тебя зовут в войс'; $('#sub').textContent = 'Друг создал комнату. Нажми — и вы на связи.'; $('#go').textContent = 'Войти в комнату'; }
+$('#codeIn').hidden = !!room; $('#codeIn').value = 'lux-' + Math.random().toString(36).slice(2, 6);
+$('#codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('#go').click(); });
+if (location.protocol === 'file:') toast('Открой сайт по адресу GitHub Pages, а не файлом с компьютера');
 $('#go').onclick = async () => {
+  const code = clean(room || $('#codeIn').value);
+  if (code.length < 3) return toast('Код: минимум 3 символа, буквы, цифры и дефис');
+  room = code;
   try { await buildAudio(); }
   catch { return toast('Разреши доступ к микрофону в настройках браузера'); }
   meter(local, '#p-me', true); initSettings();
   try { navigator.wakeLock && navigator.wakeLock.request('screen'); } catch {}
   await loadIce();
-  room ? join() : create();
+  host();
 };
 
 function wire() {
@@ -224,36 +229,39 @@ function wire() {
   peer.on('connection', setConn);
   peer.on('disconnected', () => { try { peer.reconnect(); } catch {} });
   peer.on('error', e => {
-    if (e.type === 'peer-unavailable') { toast('Комната не найдена или хост уже вышел'); setTimeout(leave, 2500); }
-    else if (e.type !== 'unavailable-id') toast('Ошибка сети: ' + e.type);
+    if (e.type === 'unavailable-id') { if (++tries > 4) return toast('Не получилось войти, попробуй другой код'); join(); }
+    else if (e.type === 'peer-unavailable') { if (++tries > 4) return toast('Комната пуста: попроси друга зайти с тем же кодом'); setTimeout(host, 800); }
+    else toast('Ошибка сети: ' + e.type);
   });
 }
 
 function showRoom() { $('#home').hidden = true; $('#room').hidden = false; $('#jitsi').hidden = false; }
 // запасной вариант: общая комната в Jitsi (свои серверы, работает без настройки)
-$('#jitsi').onclick = () => window.open('https://meet.jit.si/luxvoice-' + (room || peer.id) + '#config.startWithVideoMuted=true', '_blank');
+$('#jitsi').onclick = () => window.open('https://meet.jit.si/luxvoice-' + room + '#config.startWithVideoMuted=true', '_blank');
 // Safari/телефоны: если звук заблокирован, любое касание его включает
 addEventListener('pointerdown', () => { const a = $('#aud'); if (a.srcObject && a.paused) a.play().catch(() => {}); if (actx && actx.state === 'suspended') actx.resume(); });
 
-function create() {
-  const id = 'lux' + Math.random().toString(36).slice(2, 8);
-  peer = new Peer(id, { config: ICE });
+function host() {
+  try { peer && peer.destroy(); } catch {}
+  peer = new Peer('luxv-' + room, { config: ICE });
   peer.on('open', () => {
-    $('#link').value = location.origin + location.pathname + '?r=' + id; $('#code').textContent = 'Код комнаты: ' + id;
-    showRoom(); setStatus('ждём друга', false); sys('Комната создана. Отправь ссылку другу.');
+    const base = location.href.split('#')[0].split('?')[0];
+    $('#link').value = base + '?r=' + room; $('#code').textContent = 'Код комнаты: ' + room;
+    $('#invite').hidden = false; showRoom(); setStatus('ждём друга', false); sys('Ты в комнате «' + room + '». Отправь другу ссылку или код.');
   });
   wire();
 }
 
 function join() {
+  try { peer && peer.destroy(); } catch {}
   peer = new Peer({ config: ICE });
   wire();
   peer.on('open', () => {
     showRoom(); $('#invite').hidden = true; setStatus('подключаемся…', false);
     const dial = () => {
       if (conn) try { conn.close(); } catch {}
-      setConn(peer.connect(room, { reliable: true }));
-      const c = peer.call(room, local); watch(c); c.on('stream', playVoice);
+      setConn(peer.connect('luxv-' + room, { reliable: true }));
+      const c = peer.call('luxv-' + room, local); watch(c); c.on('stream', playVoice);
     };
     dial();
     joinT = setTimeout(() => { dial(); joinT = setTimeout(() => { setStatus('нет связи', false); toast('Не соединилось. Оба нажмите «Запасной вход» вверху'); }, 12000); }, 10000);
